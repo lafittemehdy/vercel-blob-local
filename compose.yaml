@@ -1,0 +1,20 @@
+name: vercel-blob-local
+
+services:
+  vercel-blob:
+    build:
+      context: .
+    image: vercel-blob-local:latest
+    environment:
+      BLOB_READ_WRITE_TOKEN: ${BLOB_READ_WRITE_TOKEN:-vercel_blob_rw_local_test}
+      HOST: 0.0.0.0
+      PORT: "3000"
+      VERCEL_BLOB_LOCAL_DIR: /data
+      VERCEL_BLOB_LOCAL_PUBLIC_URL: ${VERCEL_BLOB_LOCAL_PUBLIC_URL:-http://localhost:4545}
+    ports:
+      - "127.0.0.1:${VERCEL_BLOB_LOCAL_PORT:-4545}:3000"
+    volumes:
+      - vercel_blob_local_data:/data
+
+volumes:
+  vercel_blob_local_data:

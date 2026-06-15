@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.vercel-blob-local/
+*.log
+.DS_Store

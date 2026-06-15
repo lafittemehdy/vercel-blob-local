@@ -1,0 +1,28 @@
+{
+	"name": "vercel-blob-local",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Docker-only local Vercel Blob API service for development and tests.",
+	"license": "MIT",
+	"type": "module",
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"build": "tsup src/server.ts --format esm --platform node --target node20 --clean",
+		"check": "pnpm run typecheck && pnpm run test",
+		"docker:build": "docker build -t vercel-blob-local .",
+		"docker:down": "docker compose down",
+		"docker:up": "docker compose up -d --wait --build",
+		"start": "node dist/server.js",
+		"test": "pnpm run build && node --test test/server.test.mjs",
+		"typecheck": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"@vercel/blob": "2.3.3",
+		"@types/node": "^24.10.1",
+		"tsup": "^8.5.0",
+		"typescript": "^5.9.3"
+	},
+	"packageManager": "pnpm@10.13.1"
+}
