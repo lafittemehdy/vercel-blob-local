@@ -33,6 +33,11 @@ VERCEL_BLOB_API_URL="http://localhost:4545"
 The Compose file exposes the API on `http://localhost:4545` and binds it to
 `127.0.0.1` by default.
 
+Published images:
+
+- `ghcr.io/lafittemehdy/vercel-blob-local`
+- `lafittemehdy/vercel-blob-local` once Docker Hub secrets are configured
+
 ### Authentication
 
 API commands and private blob URLs require an
