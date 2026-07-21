@@ -29,6 +29,8 @@ export type CreateOptions = {
 
 export const DEFAULT_PORT = 3000;
 export const LOCALHOST = "localhost";
+export const DEFAULT_MAXIMUM_REQUEST_BODY_SIZE = 100 * 1024 * 1024;
+export const MAXIMUM_CONTROL_BODY_SIZE = 2 * 1024 * 1024;
 
 export function getHeader(
 	request: IncomingMessage,
@@ -155,11 +157,66 @@ function mapError(error: unknown): {
 	return { code: "unknown_error", message, statusCode: 500 };
 }
 
-export async function readBody(request: IncomingMessage): Promise<Buffer> {
+export function getMaximumRequestBodySize(): number {
+	const configured = process.env.VERCEL_BLOB_LOCAL_MAX_BODY_SIZE;
+
+	if (configured === undefined) {
+		return DEFAULT_MAXIMUM_REQUEST_BODY_SIZE;
+	}
+
+	const maximumSize = Number(configured);
+
+	if (!Number.isSafeInteger(maximumSize) || maximumSize < 1) {
+		throw new BlobError(
+			"VERCEL_BLOB_LOCAL_MAX_BODY_SIZE must be a positive integer",
+		);
+	}
+
+	return maximumSize;
+}
+
+export function assertRequestBodyWithinLimit(
+	request: IncomingMessage,
+	maximumSize: number,
+): void {
+	const contentLength = getHeader(request, "content-length");
+
+	if (contentLength === undefined) {
+		return;
+	}
+
+	const declaredSize = Number(contentLength);
+
+	if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) {
+		throw new BlobError("content-length header must be a non-negative integer");
+	}
+
+	if (declaredSize > maximumSize) {
+		throw new BlobFileTooLargeError(
+			`Request body is larger than the maximum size of ${maximumSize} bytes`,
+		);
+	}
+}
+
+export async function readBody(
+	request: IncomingMessage,
+	maximumSize = MAXIMUM_CONTROL_BODY_SIZE,
+): Promise<Buffer> {
+	assertRequestBodyWithinLimit(request, maximumSize);
 	const chunks: Buffer[] = [];
+	let size = 0;
 
 	for await (const chunk of request) {
-		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+		size += buffer.length;
+
+		if (size > maximumSize) {
+			throw new BlobFileTooLargeError(
+				`Request body is larger than the maximum size of ${maximumSize} bytes`,
+			);
+		}
+
+		chunks.push(buffer);
 	}
 
 	return Buffer.concat(chunks);

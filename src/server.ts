@@ -1,7 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename } from "node:path";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
+import {
+	assertAuthorized,
+	buildContentDisposition,
+} from "./blob-constraints.js";
 import {
 	BlobError,
 	BlobNotFoundError,
@@ -11,16 +16,21 @@ import {
 	createMultipartUpload,
 	del,
 	get,
+	getDirectHead,
 	head,
 	list,
 	type Part,
 	put,
+	reconcileStorage,
+	rename,
 	runWithBaseUrl,
 	uploadPart,
 } from "./index.js";
 import {
 	LOCALHOST,
+	assertRequestBodyWithinLimit,
 	getHeader,
+	getMaximumRequestBodySize,
 	getPublicBaseUrl,
 	getRequestBaseUrl,
 	normalizePublicBaseUrl,
@@ -38,6 +48,8 @@ async function handleDelete(
 	request: IncomingMessage,
 	response: ServerResponse,
 ): Promise<void> {
+	const token = readBearerToken(request);
+	assertAuthorized(token ? { token } : undefined);
 	const body = await readBody(request);
 	const parsed = JSON.parse(body.toString("utf8")) as { urls?: unknown };
 
@@ -46,8 +58,6 @@ async function handleDelete(
 	}
 
 	const ifMatch = getHeader(request, "x-if-match");
-	const token = readBearerToken(request);
-
 	await del(parsed.urls as string[] | string, {
 		...(ifMatch ? { ifMatch } : {}),
 		...(token ? { token } : {}),
@@ -115,20 +125,44 @@ async function handlePut(
 	const pathname = requireSearchParam(url, "pathname");
 	const fromUrl = url.searchParams.get("fromUrl");
 	const options = readCreateOptions(request);
+	assertAuthorized(options);
 
 	if (fromUrl !== null) {
 		sendJson(response, 200, await copy(fromUrl, pathname, options));
 		return;
 	}
 
-	const body = await readBody(request);
+	const maximumSizeInBytes = getMaximumRequestBodySize();
+	assertRequestBodyWithinLimit(request, maximumSizeInBytes);
+	const contentLength = getHeader(request, "content-length");
+	const transferEncoding = getHeader(request, "transfer-encoding");
 
-	if (body.length === 0 && pathname.endsWith("/")) {
+	if (
+		pathname.endsWith("/") &&
+		(contentLength === undefined || contentLength === "0") &&
+		transferEncoding === undefined
+	) {
 		sendJson(response, 200, await createFolder(pathname, options));
 		return;
 	}
 
-	sendJson(response, 200, await put(pathname, body, options));
+	sendJson(
+		response,
+		200,
+		await put(pathname, request, { ...options, maximumSizeInBytes }),
+	);
+}
+
+async function handleRename(
+	request: IncomingMessage,
+	url: URL,
+	response: ServerResponse,
+): Promise<void> {
+	const fromUrl = requireSearchParam(url, "fromUrl");
+	const pathname = requireSearchParam(url, "pathname");
+	const options = readCreateOptions(request);
+
+	sendJson(response, 200, await rename(fromUrl, pathname, options));
 }
 
 async function handleMultipart(
@@ -139,6 +173,7 @@ async function handleMultipart(
 	const pathname = requireSearchParam(url, "pathname");
 	const options = readCreateOptions(request);
 	const action = requireHeader(request, "x-mpu-action");
+	assertAuthorized(options);
 
 	switch (action) {
 		case "create":
@@ -149,7 +184,8 @@ async function handleMultipart(
 			const key = decodeURIComponent(requireHeader(request, "x-mpu-key"));
 			const uploadId = requireHeader(request, "x-mpu-upload-id");
 			const partNumber = Number(requireHeader(request, "x-mpu-part-number"));
-			const body = await readBody(request);
+			const maximumSizeInBytes = getMaximumRequestBodySize();
+			assertRequestBodyWithinLimit(request, maximumSizeInBytes);
 
 			if (!Number.isInteger(partNumber) || partNumber < 1) {
 				throw new BlobError("x-mpu-part-number header is invalid");
@@ -158,9 +194,10 @@ async function handleMultipart(
 			sendJson(
 				response,
 				200,
-				await uploadPart(pathname, body, {
+				await uploadPart(pathname, request, {
 					...options,
 					key,
+					maximumSizeInBytes,
 					partNumber,
 					uploadId,
 				}),
@@ -171,6 +208,7 @@ async function handleMultipart(
 		case "complete": {
 			const key = decodeURIComponent(requireHeader(request, "x-mpu-key"));
 			const uploadId = requireHeader(request, "x-mpu-upload-id");
+			assertAuthorized(options);
 			const body = await readBody(request);
 			const parts = JSON.parse(body.toString("utf8")) as Part[];
 
@@ -196,7 +234,7 @@ function pathnameFromDirectUrl(url: URL): string {
 }
 
 function downloadContentDisposition(pathname: string): string {
-	return `attachment; filename="${basename(pathname)}"`;
+	return buildContentDisposition(pathname, "attachment");
 }
 
 async function handleDirectRead(
@@ -208,11 +246,15 @@ async function handleDirectRead(
 	const shouldDownload = url.searchParams.get("download") === "1";
 	const ifNoneMatch = getHeader(request, "if-none-match");
 	const token = readBearerToken(request);
-	const result = await get(pathname, {
+	const options = {
 		access: "private",
 		...(ifNoneMatch ? { ifNoneMatch } : {}),
 		...(token ? { token } : {}),
-	});
+	} as const;
+	const result =
+		request.method === "HEAD"
+			? await getDirectHead(pathname, options)
+			: await get(pathname, options);
 
 	if (!result) {
 		throw new BlobNotFoundError();
@@ -232,9 +274,16 @@ async function handleDirectRead(
 		return;
 	}
 
-	Readable.fromWeb(
-		result.stream as import("node:stream/web").ReadableStream<Uint8Array>,
-	).pipe(response);
+	if (!("stream" in result) || !result.stream) {
+		throw new BlobNotFoundError();
+	}
+
+	await pipeline(
+		Readable.fromWeb(
+			result.stream as import("node:stream/web").ReadableStream<Uint8Array>,
+		),
+		response,
+	);
 }
 
 async function routeRequest(
@@ -256,6 +305,11 @@ async function routeRequest(
 
 		if (request.method === "POST" && url.pathname === "/mpu") {
 			await handleMultipart(request, url, response);
+			return;
+		}
+
+		if (request.method === "POST" && url.pathname === "/rename") {
+			await handleRename(request, url, response);
 			return;
 		}
 
@@ -282,10 +336,43 @@ async function routeRequest(
 }
 
 export function createVercelBlobLocalServer(): ReturnType<typeof createServer> {
+	let storageReady: Promise<void> | undefined;
+	const ensureStorageReady = (): Promise<void> => {
+		if (!storageReady) {
+			const pending = reconcileStorage();
+			storageReady = pending;
+			void pending.catch(() => {
+				if (storageReady === pending) {
+					storageReady = undefined;
+				}
+			});
+		}
+
+		return storageReady;
+	};
+
 	return createServer((request, response) => {
-		void routeRequest(request, response).catch((error: unknown) => {
-			sendError(response, error);
-		});
+		void ensureStorageReady()
+			.then(() => routeRequest(request, response))
+			.catch((error: unknown) => {
+				if (!request.complete && !request.destroyed) {
+					request.resume();
+				}
+
+				if (
+					response.headersSent ||
+					response.destroyed ||
+					response.writableEnded
+				) {
+					if (!response.destroyed) {
+						response.destroy(error instanceof Error ? error : undefined);
+					}
+
+					return;
+				}
+
+				sendError(response, error);
+			});
 	});
 }
 

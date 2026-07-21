@@ -1,23 +1,33 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 
 import { BlobError, BlobPathnameMismatchError } from "./errors.js";
 
 const FOLDER_MARKER_FILENAME = ".vercel-blob-local-folder";
 const MAXIMUM_PATHNAME_LENGTH = 950;
+const CLEANUP_DIR = ".cleanup";
+const DATA_DIR = ".data";
 const METADATA_DIR = ".metadata";
 const MULTIPART_DIR = ".multipart";
+const RESERVED_TOP_LEVEL_DIRECTORIES = new Set([
+	CLEANUP_DIR,
+	DATA_DIR,
+	METADATA_DIR,
+	MULTIPART_DIR,
+]);
+const RESERVED_SERVICE_PATHNAMES = new Set(["health"]);
 
 export function getStorageRoot(): string {
 	return resolve(process.env.VERCEL_BLOB_LOCAL_DIR ?? ".vercel-blob-local");
 }
 
 function pathnameFromUrlOrPathname(urlOrPathname: string): string {
-	try {
+	if (/^[a-z][a-z\d+.-]*:\/\//iu.test(urlOrPathname)) {
 		const parsed = new URL(urlOrPathname);
 		return decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
-	} catch {
-		return urlOrPathname.replace(/^\/+/, "");
 	}
+
+	return urlOrPathname.replace(/^\/+/, "");
 }
 
 export function normalizePathname(urlOrPathname: string): string {
@@ -26,7 +36,11 @@ export function normalizePathname(urlOrPathname: string): string {
 		.replace(/^\/+/, "");
 	const hasTrailingSlash = pathname.endsWith("/");
 
-	if (!pathname || pathname.includes("\0")) {
+	if (
+		!pathname ||
+		!pathname.isWellFormed() ||
+		/[\u0000-\u001f\u007f]/u.test(pathname)
+	) {
 		throw new BlobPathnameMismatchError("Blob pathname is invalid");
 	}
 
@@ -48,7 +62,26 @@ export function normalizePathname(urlOrPathname: string): string {
 		throw new BlobPathnameMismatchError("Blob pathname cannot escape storage");
 	}
 
-	return `${parts.join("/")}${hasTrailingSlash ? "/" : ""}`;
+	const [topLevelDirectory] = parts;
+
+	if (
+		topLevelDirectory &&
+		RESERVED_TOP_LEVEL_DIRECTORIES.has(topLevelDirectory.toLowerCase())
+	) {
+		throw new BlobPathnameMismatchError(
+			"Blob pathname uses a reserved storage namespace",
+		);
+	}
+
+	const normalizedPathname = `${parts.join("/")}${hasTrailingSlash ? "/" : ""}`;
+
+	if (RESERVED_SERVICE_PATHNAMES.has(normalizedPathname.toLowerCase())) {
+		throw new BlobPathnameMismatchError(
+			"Blob pathname conflicts with a reserved service endpoint",
+		);
+	}
+
+	return normalizedPathname;
 }
 
 export function resolveDataPath(pathname: string): string {
@@ -70,7 +103,33 @@ export function resolveDataPath(pathname: string): string {
 	return absolutePath;
 }
 
+export function resolveStoredDataPath(
+	pathname: string,
+	dataFile?: string,
+): string {
+	if (dataFile === undefined) {
+		return resolveDataPath(pathname);
+	}
+
+	if (
+		basename(dataFile) !== dataFile ||
+		!/^[.]vercel-blob-local-data-[a-f0-9]{32}[.]blob$/u.test(dataFile)
+	) {
+		throw new BlobPathnameMismatchError("Stored blob data path is invalid");
+	}
+
+	return resolve(getStorageRoot(), DATA_DIR, dataFile);
+}
+
 export function metadataPath(pathname: string): string {
+	return resolve(
+		getStorageRoot(),
+		METADATA_DIR,
+		`v2-${createHash("sha256").update(pathname).digest("hex")}.json`,
+	);
+}
+
+export function legacyMetadataPath(pathname: string): string {
 	return resolve(
 		getStorageRoot(),
 		METADATA_DIR,
@@ -82,8 +141,24 @@ export function metadataRoot(): string {
 	return resolve(getStorageRoot(), METADATA_DIR);
 }
 
+export function dataRoot(): string {
+	return resolve(getStorageRoot(), DATA_DIR);
+}
+
+export function cleanupRoot(): string {
+	return resolve(getStorageRoot(), CLEANUP_DIR);
+}
+
+export function multipartStorageRoot(): string {
+	return resolve(getStorageRoot(), MULTIPART_DIR);
+}
+
 export function multipartRoot(uploadId: string): string {
-	return resolve(getStorageRoot(), MULTIPART_DIR, normalizePathname(uploadId));
+	if (!/^[a-f0-9]{32}$/u.test(uploadId)) {
+		throw new BlobPathnameMismatchError("Multipart upload ID is invalid");
+	}
+
+	return resolve(multipartStorageRoot(), uploadId);
 }
 
 export function multipartMetadataPath(uploadId: string): string {
@@ -94,5 +169,16 @@ export function multipartPartPath(
 	uploadId: string,
 	partNumber: number,
 ): string {
+	if (!Number.isSafeInteger(partNumber) || partNumber < 1) {
+		throw new BlobError("Multipart part number must be a positive integer");
+	}
+
 	return resolve(multipartRoot(uploadId), `${partNumber}.part`);
+}
+
+export function cleanupRecordPath(pathname: string): string {
+	return resolve(
+		cleanupRoot(),
+		`v2-${createHash("sha256").update(pathname).digest("hex")}.json`,
+	);
 }

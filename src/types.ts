@@ -141,6 +141,17 @@ export interface CopyBlobResult {
 	url: string;
 }
 
+export type RenameCommandOptions = CommonCreateBlobOptions;
+
+export interface RenameBlobResult {
+	contentDisposition: string;
+	contentType: string;
+	downloadUrl: string;
+	etag: string;
+	pathname: string;
+	url: string;
+}
+
 export type CreateFolderCommandOptions = Pick<
 	CommonCreateBlobOptions,
 	"abortSignal" | "token"

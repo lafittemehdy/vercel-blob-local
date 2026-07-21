@@ -13,6 +13,23 @@ Compose file persists using a named volume. If running outside Docker, it
 defaults to `.vercel-blob-local` in your current working directory,
 configurable via `VERCEL_BLOB_LOCAL_DIR`.
 
+Blobs in volumes created by earlier releases remain readable unless their
+pathnames conflict with the reserved names below. Compatible legacy blobs are
+moved to the generation-addressed storage format automatically when
+overwritten. The internal top-level namespaces `.data`, `.metadata`,
+`.multipart`, and `.cleanup`, plus the single-segment service pathname
+`health`, are reserved case-insensitively. Unsupported legacy entries are
+skipped by `list()` and cannot be managed through the API; back up or relocate
+them before upgrading.
+
+Use one service instance per storage directory. Startup reconciliation removes
+interrupted writes and obsolete generations, so sharing the same directory
+between concurrently running instances is not supported.
+
+Blob upload requests are limited to 100 MiB by default. Set
+`VERCEL_BLOB_LOCAL_MAX_BODY_SIZE` to a maximum number of bytes to override the
+limit.
+
 ## Docker Setup
 
 Start the service:
@@ -36,7 +53,7 @@ The Compose file exposes the API on `http://localhost:4545` and binds it to
 Published images:
 
 - `ghcr.io/lafittemehdy/vercel-blob-local`
-- `lafittemehdy/vercel-blob-local` once Docker Hub secrets are configured
+- `lafittemehdy/vercel-blob-local`
 
 ### Authentication
 
@@ -44,11 +61,19 @@ API commands and private blob URLs require an
 `Authorization: Bearer <BLOB_READ_WRITE_TOKEN>` header. Public blobs can be
 read freely without it.
 
+The emulator supports static read-write tokens only. Vercel OIDC credentials,
+`issueSignedToken()`, and `presignUrl()`/presigned URLs are not emulated. Unset
+`VERCEL_OIDC_TOKEN` and `BLOB_STORE_ID` when using the local service because
+the SDK prioritizes those credentials; either set `BLOB_READ_WRITE_TOKEN` as
+shown above or pass the local `token` explicitly to SDK operations.
+
 ## SDK Compatibility
 
 The goal is a seamless local setup using standard environment variables: no
 monkey-patching the SDK, modifying local DNS, or managing self-signed HTTPS
 certificates.
+
+Compatibility is tested against `@vercel/blob` 2.6.1.
 
 The following features work out of the box via `VERCEL_BLOB_API_URL`:
 
@@ -57,6 +82,7 @@ The following features work out of the box via `VERCEL_BLOB_API_URL`:
 - `list`
 - `del`
 - `copy`
+- `rename`
 - folder creation
 - multipart uploads
 
@@ -95,6 +121,8 @@ This keeps your primary SDK interactions environment-swappable while working
 around the one hostname-bound SDK limitation explicitly.
 
 ## Development
+
+Development and builds use Node.js 24 LTS.
 
 ```bash
 pnpm install
