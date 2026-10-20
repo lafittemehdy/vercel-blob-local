@@ -36,7 +36,7 @@ import {
 	normalizePublicBaseUrl,
 	parsePort,
 	readBearerToken,
-	readBody,
+	readJson,
 	readCreateOptions,
 	requireHeader,
 	requireSearchParam,
@@ -50,10 +50,9 @@ async function handleDelete(
 ): Promise<void> {
 	const token = readBearerToken(request);
 	assertAuthorized(token ? { token } : undefined);
-	const body = await readBody(request);
-	const parsed = JSON.parse(body.toString("utf8")) as { urls?: unknown };
+	const parsed = await readJson(request) as { urls?: unknown } | null;
 
-	if (!Array.isArray(parsed.urls) && typeof parsed.urls !== "string") {
+	if (!parsed || (!Array.isArray(parsed.urls) && typeof parsed.urls !== "string")) {
 		throw new BlobError("urls is required");
 	}
 
@@ -209,8 +208,7 @@ async function handleMultipart(
 			const key = decodeURIComponent(requireHeader(request, "x-mpu-key"));
 			const uploadId = requireHeader(request, "x-mpu-upload-id");
 			assertAuthorized(options);
-			const body = await readBody(request);
-			const parts = JSON.parse(body.toString("utf8")) as Part[];
+			const parts = await readJson(request) as Part[];
 
 			sendJson(
 				response,

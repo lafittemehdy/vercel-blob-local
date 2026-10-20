@@ -222,6 +222,16 @@ export async function readBody(
 	return Buffer.concat(chunks);
 }
 
+export async function readJson(request: IncomingMessage): Promise<unknown> {
+	const body = await readBody(request);
+
+	try {
+		return JSON.parse(body.toString("utf8"));
+	} catch {
+		throw new BlobError("Request body must be valid JSON");
+	}
+}
+
 export function requireSearchParam(url: URL, name: string): string {
 	const value = url.searchParams.get(name);
 

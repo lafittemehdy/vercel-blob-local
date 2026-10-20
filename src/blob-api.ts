@@ -99,6 +99,7 @@ type MultipartMetadata = {
 	key: string;
 	maximumSizeInBytes?: number;
 	pathname: string;
+	requestedPathname?: string;
 	uploadId: string;
 };
 
@@ -986,7 +987,7 @@ async function resolveDirectBlob(
 
 	const blob = metadataToHeadResult(metadata);
 	const headers = new Headers({
-		"cache-control": metadata.cacheControl,
+		"cache-control": blob.cacheControl,
 		"content-disposition": buildContentDisposition(metadata.pathname),
 		etag: metadata.etag,
 	});
@@ -1030,13 +1031,16 @@ export async function del(
 
 	const inputs = Array.isArray(urlOrPathname) ? urlOrPathname : [urlOrPathname];
 
+	if (inputs.some((input) => typeof input !== "string")) {
+		throw new BlobError("urls must contain only strings");
+	}
+	const pathnames = inputs.map(normalizePathname);
+
 	if (inputs.length > 1 && options?.ifMatch) {
 		throw new BlobError("ifMatch can only be used when deleting one blob");
 	}
 
-	for (const input of inputs) {
-		const pathname = normalizePathname(input);
-
+	for (const pathname of pathnames) {
 		await withPathnameLock(pathname, async () => {
 			const pending = await readDeletionRecord(pathname);
 			const legacyMetadata = await readLegacyMetadata(pathname);
@@ -1319,6 +1323,7 @@ export async function createMultipartUpload(
 		access: options.access,
 		key,
 		pathname,
+		requestedPathname: normalizePathname(pathnameInput),
 		uploadId,
 		...(options.cacheControlMaxAge === undefined
 			? {}
@@ -1351,7 +1356,10 @@ export async function uploadPart(
 	const pathname = normalizePathname(pathnameInput);
 	const metadata = await readMultipartMetadata(options.uploadId);
 
-	if (metadata.key !== options.key || metadata.pathname !== pathname) {
+	if (
+		metadata.key !== options.key ||
+		(metadata.requestedPathname ?? metadata.pathname) !== pathname
+	) {
 		throw new BlobPathnameMismatchError(
 			"Multipart upload key or pathname does not match",
 		);
@@ -1414,7 +1422,10 @@ export async function completeMultipartUpload(
 	const pathname = normalizePathname(pathnameInput);
 	const metadata = await readMultipartMetadata(options.uploadId);
 
-	if (metadata.key !== options.key || metadata.pathname !== pathname) {
+	if (
+		metadata.key !== options.key ||
+		(metadata.requestedPathname ?? metadata.pathname) !== pathname
+	) {
 		throw new BlobPathnameMismatchError(
 			"Multipart upload key or pathname does not match",
 		);
@@ -1472,7 +1483,7 @@ export async function completeMultipartUpload(
 		putOptions.ifMatch = options.ifMatch;
 	}
 
-	const result = await put(pathname, Readable.from(verifiedParts()), putOptions);
+	const result = await put(metadata.pathname, Readable.from(verifiedParts()), putOptions);
 
 	await rm(multipartRoot(options.uploadId), { force: true, recursive: true });
 

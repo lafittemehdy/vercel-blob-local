@@ -64,7 +64,7 @@ export function buildMetadata(
 ): StoredMetadata {
 	return {
 		access: options.access,
-		cacheControl: buildCacheControl(options.cacheControlMaxAge),
+		cacheControl: buildCacheControl(options.access, options.cacheControlMaxAge),
 		contentDisposition: buildContentDisposition(pathname),
 		contentType: options.contentType ?? inferContentType(pathname),
 		...(file.dataFile === undefined ? {} : { dataFile: file.dataFile }),
@@ -176,7 +176,9 @@ export function metadataToHeadResult(
 	metadata: StoredMetadata,
 ): HeadBlobResult {
 	return {
-		cacheControl: metadata.cacheControl,
+		cacheControl: metadata.access === "private"
+			? metadata.cacheControl.replace(/^public\b/u, "private")
+			: metadata.cacheControl,
 		contentDisposition: buildContentDisposition(metadata.pathname),
 		contentType: metadata.contentType,
 		downloadUrl: getDownloadUrl(metadata.pathname),

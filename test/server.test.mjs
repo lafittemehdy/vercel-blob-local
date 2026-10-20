@@ -262,7 +262,7 @@ function beginRawPut(baseUrl, pathname, contentLength, token = LOCAL_TOKEN) {
 	return { request, response };
 }
 
-test("@vercel/blob 2.6.1 covers every claimed SDK operation", async () => {
+test("@vercel/blob 2.8.2 covers every claimed SDK operation", async () => {
 	await withBlobApi(async (baseUrl) => {
 		const created = await put("api/a.txt", "hello", {
 			access: "private",
@@ -315,10 +315,19 @@ test("@vercel/blob 2.6.1 covers every claimed SDK operation", async () => {
 		);
 		assert.equal(await downloadResponse.text(), "public");
 
-		await assert.rejects(
-			() => sdkGet(publicBlob.url, { access: "public" }),
-			/Invalid URL: the URL does not point to a Vercel Blob store/u,
-		);
+		const sdkPublic = await sdkGet(publicBlob.url, { access: "public" });
+		assert.equal(sdkPublic.statusCode, 200);
+		assert.equal(await new Response(sdkPublic.stream).text(), "public");
+		const sdkPrivate = await sdkGet(created.url, { access: "private", useCache: false });
+		assert.equal(sdkPrivate.statusCode, 200);
+		assert.equal(await new Response(sdkPrivate.stream).text(), "hello");
+		const sdkUnchanged = await sdkGet(publicBlob.url, {
+			access: "public",
+			ifNoneMatch: publicEtag,
+		});
+		assert.equal(sdkUnchanged.statusCode, 304);
+		assert.equal(sdkUnchanged.stream, null);
+		assert.equal(await sdkGet(`${baseUrl}/api/missing.txt`, { access: "public" }), null);
 
 		const copied = await copy("api/a.txt", "api/b.txt", {
 			access: "private",
@@ -382,6 +391,99 @@ test("@vercel/blob 2.6.1 covers every claimed SDK operation", async () => {
 		await assert.rejects(() => head("api/a.txt"), {
 			name: "Error",
 		});
+	});
+});
+
+test("private blobs never advertise public caching, including legacy metadata", async () => {
+	await withBlobApi(async (_baseUrl, root, { restart }) => {
+		const blob = await put("cache/private.txt", "secret", { access: "private" });
+		const storagePath = storedMetadataPath(root, blob.pathname);
+		const metadata = JSON.parse(await readFile(storagePath, "utf8"));
+		assert.equal(metadata.cacheControl, "private, max-age=2592000");
+
+		metadata.cacheControl = "public, max-age=120";
+		await writeFile(storagePath, JSON.stringify(metadata));
+		await restart();
+		const current = await head(blob.pathname);
+		assert.equal(current.cacheControl, "private, max-age=120");
+		for (const method of ["GET", "HEAD"]) {
+			for (const conditional of [false, true]) {
+				const response = await fetch(current.url, {
+					headers: {
+						authorization: `Bearer ${LOCAL_TOKEN}`,
+						...(conditional ? { "if-none-match": current.etag } : {}),
+					},
+					method,
+				});
+				assert.equal(response.status, conditional ? 304 : 200);
+				assert.equal(response.headers.get("cache-control"), "private, max-age=120");
+				await response.arrayBuffer();
+			}
+		}
+	});
+});
+
+test("malformed delete requests cannot partially delete valid blobs", async () => {
+	await withBlobApi(async (baseUrl) => {
+		const blob = await put("delete/preserved.txt", "keep", { access: "private" });
+		for (const body of [
+			"{broken", "null", "{}", "42",
+			JSON.stringify({ urls: [blob.pathname, null] }),
+			JSON.stringify({ urls: [blob.pathname, 1] }),
+			JSON.stringify({ urls: [blob.pathname, "../outside"] }),
+			JSON.stringify({ urls: [blob.pathname, ".data/reserved"] }),
+		]) {
+			const response = await fetch(`${baseUrl}/delete`, {
+				body,
+				headers: { authorization: `Bearer ${LOCAL_TOKEN}` },
+				method: "POST",
+			});
+			assert.equal(response.status, 400, body);
+			assert.equal((await response.json()).error.code, "bad_request");
+			assert.equal(await readReturnedUrl(blob.url), "keep");
+		}
+	});
+});
+
+test("multipart random suffixes work with manual and automatic SDK uploads", async () => {
+	await withBlobApi(async () => {
+		const options = { access: "private", addRandomSuffix: true };
+		const uploader = await createMultipartUploader("multipart/random.txt", options);
+		const part = await uploader.uploadPart(1, "manual");
+		const manual = await uploader.complete([part]);
+		assert.match(manual.pathname, /^multipart\/random-[a-f0-9]{8}\.txt$/u);
+		assert.equal(await readReturnedUrl(manual.url), "manual");
+
+		const automatic = await put("multipart/random.txt", "automatic", {
+			...options,
+			multipart: true,
+		});
+		assert.match(automatic.pathname, /^multipart\/random-[a-f0-9]{8}\.txt$/u);
+		assert.notEqual(automatic.pathname, manual.pathname);
+		assert.equal(await readReturnedUrl(automatic.url), "automatic");
+	});
+});
+
+test("malformed multipart JSON is rejected without losing uploaded parts", async () => {
+	await withBlobApi(async (baseUrl) => {
+		const pathname = "multipart/preserved.txt";
+		const uploader = await createMultipartUploader(pathname, { access: "private" });
+		const part = await uploader.uploadPart(1, "keep");
+		const url = new URL("/mpu", baseUrl);
+		url.searchParams.set("pathname", pathname);
+		const response = await fetch(url, {
+			body: "{broken",
+			headers: {
+				authorization: `Bearer ${LOCAL_TOKEN}`,
+				"x-mpu-action": "complete",
+				"x-mpu-key": encodeURIComponent(uploader.key),
+				"x-mpu-upload-id": uploader.uploadId,
+			},
+			method: "POST",
+		});
+		assert.equal(response.status, 400);
+		assert.equal((await response.json()).error.code, "bad_request");
+		assert.equal(await readReturnedUrl((await uploader.complete([part])).url), "keep");
 	});
 });
 

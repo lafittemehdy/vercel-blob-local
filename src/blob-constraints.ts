@@ -6,7 +6,7 @@ import {
 	BlobError,
 	BlobRequestAbortedError,
 } from "./errors.js";
-import type { BlobCommandOptions } from "./types.js";
+import type { BlobAccessType, BlobCommandOptions } from "./types.js";
 
 const DEFAULT_CACHE_CONTROL_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
@@ -56,12 +56,12 @@ export function inferContentType(pathname: string): string {
 	}
 }
 
-export function buildCacheControl(maxAge?: number): string {
+export function buildCacheControl(access: BlobAccessType, maxAge?: number): string {
 	if (maxAge !== undefined && maxAge < 60) {
 		throw new BlobError("cacheControlMaxAge cannot be lower than 60 seconds");
 	}
 
-	return `public, max-age=${maxAge ?? DEFAULT_CACHE_CONTROL_MAX_AGE_SECONDS}`;
+	return `${access}, max-age=${maxAge ?? DEFAULT_CACHE_CONTROL_MAX_AGE_SECONDS}`;
 }
 
 export function addRandomSuffix(pathname: string): string {

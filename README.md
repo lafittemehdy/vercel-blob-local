@@ -73,12 +73,13 @@ The goal is a seamless local setup using standard environment variables: no
 monkey-patching the SDK, modifying local DNS, or managing self-signed HTTPS
 certificates.
 
-Compatibility is tested against `@vercel/blob` 2.6.1.
+Compatibility is tested against `@vercel/blob` 2.8.2.
 
 The following features work out of the box via `VERCEL_BLOB_API_URL`:
 
 - `put`
 - `head`
+- `get` with the returned blob URL
 - `list`
 - `del`
 - `copy`
@@ -86,43 +87,42 @@ The following features work out of the box via `VERCEL_BLOB_API_URL`:
 - folder creation
 - multipart uploads
 
-### The `get()` Exception
+### Reading blobs
 
-The official SDK's `get(pathname)` helper generates a Vercel storage hostname,
-such as `https://{storeId}.public.blob.vercel-storage.com/...`, and strictly
-validates that direct URLs match this domain. Because this is hardcoded in the
-SDK, `get()` cannot be routed locally using environment variables alone.
+With `@vercel/blob` 2.8.2, `get(url)` accepts URLs whose origin matches
+`VERCEL_BLOB_API_URL`. Pass the local `url` returned by `put`, `head`, or
+`list`. The `get(pathname)` form still generates a Vercel storage hostname
+and does not route locally.
 
-To read files during local development, fetch the direct `url` returned by
-`put`, `head`, or `list` instead:
+To read a private blob:
 
 ```ts
-import { head } from "@vercel/blob";
+import { get, head } from "@vercel/blob";
 
 const metadata = await head("wares/example.jpg");
-const response = await fetch(metadata.url, {
-	headers: {
-		authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}`,
-	},
-});
+const result = await get(metadata.url, { access: "private" });
+if (result?.statusCode === 200) {
+	const contents = await new Response(result.stream).arrayBuffer();
+}
 ```
 
 The local asset server handles:
 
 - `GET` and `HEAD` requests
 - bearer token validation for private blobs
+- private cache directives for private blobs, including legacy volumes
 - cache validation (`If-None-Match` / `304 Not Modified`)
 - standard headers (`ETag`, `Last-Modified`, `Cache-Control`, `Content-Type`,
   `Content-Length`, `Content-Disposition`)
 - the `?download=1` query parameter, matching `getDownloadUrl(url)` by
   returning an attachment disposition
 
-This keeps your primary SDK interactions environment-swappable while working
-around the one hostname-bound SDK limitation explicitly.
-
 ## Development
 
-Development and builds use Node.js 24 LTS.
+Development and builds use Node.js 24 LTS (24.11.0 or newer) and pnpm 12.14.0.
+Run `corepack enable` to use the pinned pnpm version. The workspace settings
+explicitly allow esbuild's installation script, which pnpm requires for a
+non-interactive install.
 
 ```bash
 pnpm install
